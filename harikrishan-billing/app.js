@@ -14,6 +14,10 @@
 ═══════════════════════════════════════════════════════ */
 'use strict';
 
+/* ─── SUPABASE INITIALIZATION ─── */
+const SUPABASE_URL = 'https://dkfpoeuyhqmotlfjxscr.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_8J6XdUAXI-lUIGFV0c27WA_4Feo5p8j';
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 /* ─── DEFAULTS ─── */
 const USERS_DEFAULT = [
   { id:'u1', username:'ARUU',    password:'Aruu@123', role:'admin',   active:true },
