@@ -1,16 +1,6 @@
 /* ═══════════════════════════════════════════════════════
    HARIKRISHAN INDUSTRIES – GST BILLING SYSTEM  v2
-   app.js  –  Complete application logic
-   New in v2:
-     • Bank detail preview bar on Create Invoice page
-     • Payment tracking (paid / partial / pending)
-     • Add Payment modal (both Admin & Billing User)
-     • Admin-only invoice edit; Billing user can only add payment
-     • Bill History: per-row paid / balance / status
-     • Bill History search: shows aggregate totals
-     • User Management: search + invoice count
-     • Dashboard: Collected & Pending stats
-     • Bank Settings & Business Settings properly save/load
+   app.js  –  Complete application logic (Supabase Cloud Connected)
 ═══════════════════════════════════════════════════════ */
 'use strict';
 
@@ -18,6 +8,7 @@
 const SUPABASE_URL = 'https://dkfpoeuyhqmotlfjxscr.supabase.co';
 const SUPABASE_KEY = 'sb_publishable_8J6XdUAXI-lUIGFV0c27WA_4Feo5p8j';
 const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
 /* ─── DEFAULTS ─── */
 const USERS_DEFAULT = [
   { id:'u1', username:'ARUU',    password:'Aruu@123', role:'admin',   active:true },
@@ -42,22 +33,15 @@ const BIZ_DEFAULT = {
 /* ─── STATE ─── */
 let currentUser   = null;
 let productRowIdx = 0;
-
-/* ─── STORAGE ─── */
-/* ─── SUPABASE INITIALIZATION & STORAGE ─── */
-const SUPABASE_URL = 'https://dkfpoeuyhqmotlfjxscr.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_8J6XdUAXI-lUIGFV0c27WA_4Feo5p8j';
-const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-
 let cachedInvoices = [];
 
+/* ─── STORAGE & SUPABASE SYNC ─── */
 const save  = (k,v)  => localStorage.setItem(k, JSON.stringify(v));
 const load  = (k,d)  => { try{ const v=localStorage.getItem(k); return v?JSON.parse(v):d; }catch{ return d; } };
 
 const getUsers    = ()  => load('hk_users',    USERS_DEFAULT);
 const saveUsers   = u   => save('hk_users', u);
 
-// Supabase Invoice Sync Functions
 async function fetchInvoicesFromCloud() {
   try {
     const { data, error } = await supabaseClient.from('invoices').select('*');
@@ -75,15 +59,10 @@ async function fetchInvoicesFromCloud() {
 
 const getInvoices = () => cachedInvoices;
 
-async function saveInvoicesCloud(invoices) {
-  cachedInvoices = invoices;
-}
-
-async function syncInvoiceToCloud(inv) {
+async function saveInvoicesCloud(inv) {
   try {
-    // Check if invoice already exists in cloud by invoice number or id
     const { data: existing } = await supabaseClient.from('invoices').select('*');
-    const found = (existing || []).find(r => r.invoice_data?.id === inv.id || r.invoice_data?.number === inv.number);
+    const found = (existing || []).find(r => r.invoice_data?.id === inv.id);
     
     if (found) {
       await supabaseClient.from('invoices').update({ invoice_data: inv }).eq('id', found.id);
@@ -165,7 +144,8 @@ function showScreen(id) {
   });
 }
 
-function startApp() {
+async function startApp() {
+  await fetchInvoicesFromCloud();
   showScreen('appScreen');
   applyRoleVisibility();
   updateSidebarUser();
@@ -359,7 +339,6 @@ function loadUserTable(filter) {
   const invoices = getInvoices();
   const q = (filter || document.getElementById('searchUser')?.value || '').toLowerCase().trim();
 
-  // Payment totals
   const totalBilled    = invoices.reduce((s,i)=>s+(i.netAmount||0),0);
   const totalCollected = invoices.reduce((s,i)=>s+getPaid(i),0);
   const totalPending   = invoices.reduce((s,i)=>s+Math.max(0,getBalance(i)),0);
@@ -536,9 +515,9 @@ function recalculate() {
 }
 
 /* ══════════════════════════════════════════════════════
-   SAVE INVOICE
+   SAVE INVOICE (CLOUD SYNCED)
 ══════════════════════════════════════════════════════ */
-function saveAndPreviewInvoice() {
+async function saveAndPreviewInvoice() {
   const custName=document.getElementById('custName').value.trim();
   if(!custName){ showToast('Please enter customer name.','error'); return; }
   const products=getProductRows();
@@ -573,21 +552,19 @@ function saveAndPreviewInvoice() {
     sgst:gstType==='intra'?halfGst:0,
     igst:gstType==='inter'?totalGst:0,
     roundOff,netAmount:rounded,
-    payments:[],           // ← payment array
+    payments:[],
     createdBy:currentUser.username,
     createdAt:new Date().toISOString()
   };
 
-  const invoices=getInvoices();
-  invoices.push(inv);
-  saveInvoices(invoices);
+  await saveInvoicesCloud(inv);
 
   const biz=getBiz();
   biz.nextInvNum=(parseInt(biz.nextInvNum)||1)+1;
   save('hk_biz',biz);
   document.getElementById('nextInvNum').value=biz.nextInvNum;
 
-  showToast('Invoice saved!','success');
+  showToast('Invoice saved to Cloud!','success');
   openInvoicePreview(inv);
 }
 
@@ -609,7 +586,6 @@ function openPaymentModal(invId) {
   document.getElementById('paymentModalTitle').textContent=currentUser.role==='admin'?'Manage Payments':'Add Payment';
 
   renderPaymentModal(inv);
-
   document.getElementById('paymentModal').classList.remove('hidden');
 }
 
@@ -668,18 +644,14 @@ function editPayment(paymentIndex) {
   renderPaymentModal(inv);
 }
 
-function deletePayment(paymentIndex) {
+async function deletePayment(paymentIndex) {
   if(currentUser.role!=='admin'){ showToast('Only Admin can delete payments.','error'); return; }
-  const invoices=getInvoices();
-  const invIndex=invoices.findIndex(i=>i.id===document.getElementById('payInvId').value);
-  if(invIndex===-1){ showToast('Invoice not found.','error'); return; }
-  const inv=invoices[invIndex];
-  if(!inv.payments?.[paymentIndex]){ showToast('Payment not found.','error'); return; }
+  const inv=getInvoices().find(i=>i.id===document.getElementById('payInvId').value);
+  if(!inv?.payments?.[paymentIndex]){ showToast('Payment not found.','error'); return; }
   if(!confirm('Delete this payment permanently?')) return;
 
   inv.payments.splice(paymentIndex,1);
-  invoices[invIndex]=inv;
-  saveInvoices(invoices);
+  await saveInvoicesCloud(inv);
   editingPaymentIndex=null;
   document.getElementById('payDate').value=todayISO();
   document.getElementById('payAmount').value=getBalance(inv)>0?getBalance(inv).toFixed(2):'';
@@ -691,7 +663,7 @@ function deletePayment(paymentIndex) {
   if(document.getElementById('page-billHistory').classList.contains('active')) renderHistoryTable();
 }
 
-function savePayment() {
+async function savePayment() {
   const invId  = document.getElementById('payInvId').value;
   const date   = document.getElementById('payDate').value;
   const amount = parseFloat(document.getElementById('payAmount').value) || 0;
@@ -701,24 +673,17 @@ function savePayment() {
   if (!date)      { showToast('Select payment date.', 'error'); return; }
   if (amount <= 0){ showToast('Enter valid amount.', 'error');  return; }
 
-  let invoices = getInvoices();
-  const idx = invoices.findIndex(i => i.id === invId);
-  if (idx === -1) { showToast('Invoice not found.', 'error'); return; }
+  const inv = getInvoices().find(i => i.id === invId);
+  if (!inv) { showToast('Invoice not found.', 'error'); return; }
 
-  const inv     = invoices[idx];
   const editingPayment=editingPaymentIndex===null?null:inv.payments?.[editingPaymentIndex];
   if(editingPaymentIndex!==null && currentUser.role!=='admin'){
     showToast('Only Admin can edit payments.','error');
     return;
   }
-  if(editingPaymentIndex!==null && !editingPayment){
-    showToast('Payment not found.','error');
-    return;
-  }
   const balance = getBalance(inv)+(editingPayment?Number(editingPayment.amount)||0:0);
   const st      = getStatus(inv);
 
-  // 🔒 Non-admin users CANNOT add payment to a fully paid invoice
   if (editingPaymentIndex===null && st === 'paid' && currentUser.role !== 'admin') {
     showToast('Payment already complete. Only Admin can modify payments.', 'error');
     return;
@@ -735,8 +700,8 @@ function savePayment() {
   } else {
     inv.payments.push({ id:'pay-'+Date.now(), date, amount, mode, note, addedBy: currentUser.username });
   }
-  invoices[idx] = inv;
-  saveInvoices(invoices);
+  
+  await saveInvoicesCloud(inv);
 
   showToast(editingPayment
     ?'Payment updated!'
@@ -750,19 +715,17 @@ function savePayment() {
 /* ══════════════════════════════════════════════════════
    BILL HISTORY
 ══════════════════════════════════════════════════════ */
-let historyStatusFilter = 'all'; // 'all' | 'pending' | 'partial' | 'paid'
+let historyStatusFilter = 'all';
 
 function renderHistoryTable() {
   let invoices = getInvoices();
   const q = (document.getElementById('searchInvoice')?.value || '').toLowerCase().trim();
   if (q) invoices = invoices.filter(inv => inv.number.toLowerCase().includes(q) || inv.customerName.toLowerCase().includes(q));
 
-  // Apply status filter
   if (historyStatusFilter !== 'all') {
     invoices = invoices.filter(inv => getStatus(inv) === historyStatusFilter);
   }
 
-  // Summary stats (from filtered list)
   const totalAmt     = invoices.reduce((s,i) => s+(i.netAmount||0), 0);
   const totalPaid    = invoices.reduce((s,i) => s+getPaid(i), 0);
   const totalPending = invoices.reduce((s,i) => s+Math.max(0,getBalance(i)), 0);
@@ -771,7 +734,6 @@ function renderHistoryTable() {
   document.getElementById('hsTotalPaid').textContent    = '₹'+fmtNum(totalPaid);
   document.getElementById('hsTotalPending').textContent = '₹'+fmtNum(totalPending);
 
-  // Customer-wise total
   const custMap = {};
   getInvoices().forEach(inv => {
     const name = inv.customerName || 'Unknown';
@@ -793,11 +755,10 @@ function renderHistoryTable() {
 
   tbody.innerHTML = [...invoices].reverse().map(inv => {
     const paid = getPaid(inv), balance = getBalance(inv), st = getStatus(inv);
-    // Payment button: user can add payment if NOT fully paid; admin can always manage
     const canPay = isAdmin || st !== 'paid';
     const payBtn = canPay
       ? `<button class="btn btn-sm btn-pay" onclick="openPaymentModal('${inv.id}')">💳 Pay</button>`
-      : `<span class="badge badge-paid" title="Fully paid – contact admin to modify">✅ Paid</span>`;
+      : `<span class="badge badge-paid" title="Fully paid">✅ Paid</span>`;
     return `<tr>
       <td><strong>${esc(inv.number)}</strong></td>
       <td>${formatDate(inv.date)}</td>
@@ -825,15 +786,17 @@ function setHistoryFilter(f) {
 function filterInvoices()  { renderHistoryTable(); }
 function clearSearch()     { document.getElementById('searchInvoice').value=''; renderHistoryTable(); }
 
-function deleteInvoice(id) {
+async function deleteInvoice(id) {
   if(currentUser.role!=='admin'){ showToast('Only admin can delete invoices.','error'); return; }
   if(!confirm('Delete this invoice permanently?')) return;
-  saveInvoices(getInvoices().filter(i=>i.id!==id));
-  renderHistoryTable(); showToast('Invoice deleted.','success');
+  await deleteInvoiceFromCloud(id);
+  renderHistoryTable(); 
+  renderDashboard();
+  showToast('Invoice deleted from cloud.','success');
 }
 
 /* ══════════════════════════════════════════════════════
-   EDIT INVOICE  (Admin only – opens pre-filled form)
+   EDIT INVOICE
 ══════════════════════════════════════════════════════ */
 function editInvoice(id) {
   if(currentUser.role!=='admin'){ showToast('Only admin can edit invoices.','error'); return; }
@@ -842,7 +805,6 @@ function editInvoice(id) {
 
   navigate('createInvoice');
 
-  // Pre-fill everything
   setTimeout(()=>{
     document.getElementById('invNumber').value     = inv.number;
     document.getElementById('invDate').value       = inv.date;
@@ -858,7 +820,6 @@ function editInvoice(id) {
     document.getElementById('otherCharges').value  = inv.otherCharges||0;
     document.getElementById('otherChargesLabel').value = inv.otherChargesLabel||'Packing & Forwarding';
 
-    // Load products
     productRowIdx=0;
     document.getElementById('productRows').innerHTML='';
     (inv.products||[]).forEach(p=>{
@@ -872,16 +833,13 @@ function editInvoice(id) {
     });
     recalculate();
 
-    // Mark this as an edit — override save to update existing record
     window._editingInvoiceId = id;
-    // Change button text
     const saveBtn=document.querySelector('[onclick="saveAndPreviewInvoice()"]');
     if(saveBtn) saveBtn.textContent='💾 Update Invoice';
-    showToast('Invoice loaded for editing. Make changes and save.','success');
+    showToast('Invoice loaded for editing.','success');
   }, 100);
 }
 
-/* Override save to handle update */
 const _origSave = window.saveAndPreviewInvoice;
 window.saveAndPreviewInvoice = function() {
   if (window._editingInvoiceId) {
@@ -891,7 +849,7 @@ window.saveAndPreviewInvoice = function() {
   }
 };
 
-function updateExistingInvoice(id) {
+async function updateExistingInvoice(id) {
   const custName=document.getElementById('custName').value.trim();
   if(!custName){ showToast('Please enter customer name.','error'); return; }
   const products=getProductRows();
@@ -908,12 +866,10 @@ function updateExistingInvoice(id) {
   const rounded=Math.round(raw);
   const roundOff=rounded-raw;
 
-  let invoices=getInvoices();
-  const idx=invoices.findIndex(i=>i.id===id);
-  if(idx===-1){ showToast('Invoice not found.','error'); return; }
-  const existing=invoices[idx];
+  const existing=getInvoices().find(i=>i.id===id);
+  if(!existing){ showToast('Invoice not found.','error'); return; }
 
-  invoices[idx]={
+  const updatedInv={
     ...existing,
     date:document.getElementById('invDate').value,
     challanNo:document.getElementById('challanNo').value.trim(),
@@ -933,15 +889,15 @@ function updateExistingInvoice(id) {
     updatedBy:currentUser.username,
     updatedAt:new Date().toISOString()
   };
-  saveInvoices(invoices);
 
-  // Reset edit mode
+  await saveInvoicesCloud(updatedInv);
+
   window._editingInvoiceId=null;
   const saveBtn=document.querySelector('[onclick="saveAndPreviewInvoice()"]');
   if(saveBtn) saveBtn.textContent='💾 Save & Preview';
 
-  showToast('Invoice updated!','success');
-  openInvoicePreview(invoices[idx]);
+  showToast('Invoice updated in Cloud!','success');
+  openInvoicePreview(updatedInv);
   initInvoiceForm();
 }
 
@@ -986,8 +942,6 @@ function printInvoice() {
     .inv-billing-grid{display:grid;grid-template-columns:1.2fr 1fr;border:2px solid #c0392b;border-top:none}
     .inv-billing-left{padding:8px 12px;border-right:1px solid #c0392b}
     .inv-billing-right{padding:8px 12px}
-    .inv-billing-right .inv-meta-row{border:none}
-    .inv-billing-right .inv-meta-cell{padding:4px 6px;border-right:none}
     .inv-label-sm{font-size:10px;color:#777;font-weight:700}
     .inv-ms{font-size:12.5px;font-weight:700;margin-bottom:2px}
     .inv-addr-text{font-size:11px;line-height:1.45;margin-bottom:3px}
@@ -1072,9 +1026,7 @@ function buildInvoiceHTML(inv) {
       <div class="inv-addr-text">${esc(inv.customerAddr||'').replace(/\n/g,'<br>')}</div>
       <div class="inv-gst-no"><strong>GST No. : ${esc(inv.customerGst||'')}</strong></div>
     </div>
-    <div class="inv-billing-right" style="display:flex;align-items:center;justify-content:center;color:#aaa;font-size:11px;font-style:italic;padding:10px">
-      &nbsp;
-    </div>
+    <div class="inv-billing-right" style="display:flex;align-items:center;justify-content:center;color:#aaa;font-size:11px;font-style:italic;padding:10px">&nbsp;</div>
   </div>
   <table class="inv-product-table">
     <thead><tr>
@@ -1142,17 +1094,13 @@ function buildInvoiceHTML(inv) {
 }
 
 /* ══════════════════════════════════════════════════════
-   MODALS
+   MODALS & TOAST
 ══════════════════════════════════════════════════════ */
 function closeModal(id) { document.getElementById(id).classList.add('hidden'); }
-
 document.querySelectorAll('.modal-overlay').forEach(ov=>{
   ov.addEventListener('click', e=>{ if(e.target===ov) ov.classList.add('hidden'); });
 });
 
-/* ══════════════════════════════════════════════════════
-   TOAST
-══════════════════════════════════════════════════════ */
 let _toastTimer=null;
 function showToast(msg, type='') {
   const t=document.getElementById('toast');
@@ -1204,7 +1152,3 @@ function numberToWords(num) {
   if(!localStorage.getItem('hk_users')) saveUsers(USERS_DEFAULT);
   showScreen('loginScreen');
 })();
-
-// Supabase CDN script already loaded via <script> tag in index.html
-// Use window.supabase object if needed
-
