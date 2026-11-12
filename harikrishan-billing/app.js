@@ -44,12 +44,71 @@ let currentUser   = null;
 let productRowIdx = 0;
 
 /* ─── STORAGE ─── */
+/* ─── SUPABASE INITIALIZATION & STORAGE ─── */
+const SUPABASE_URL = 'https://dkfpoeuyhqmotlfjxscr.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_8J6XdUAXI-lUIGFV0c27WA_4Feo5p8j';
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+let cachedInvoices = [];
+
 const save  = (k,v)  => localStorage.setItem(k, JSON.stringify(v));
 const load  = (k,d)  => { try{ const v=localStorage.getItem(k); return v?JSON.parse(v):d; }catch{ return d; } };
+
 const getUsers    = ()  => load('hk_users',    USERS_DEFAULT);
 const saveUsers   = u   => save('hk_users', u);
-const getInvoices = ()  => load('hk_invoices', []);
-const saveInvoices= i   => save('hk_invoices', i);
+
+// Supabase Invoice Sync Functions
+async function fetchInvoicesFromCloud() {
+  try {
+    const { data, error } = await supabaseClient.from('invoices').select('*');
+    if (error) { console.error('Error fetching invoices:', error); return []; }
+    cachedInvoices = (data || []).map(row => ({
+      dbId: row.id,
+      ...(row.invoice_data || {})
+    }));
+    return cachedInvoices;
+  } catch (err) {
+    console.error('Cloud fetch failed:', err);
+    return [];
+  }
+}
+
+const getInvoices = () => cachedInvoices;
+
+async function saveInvoicesCloud(invoices) {
+  cachedInvoices = invoices;
+}
+
+async function syncInvoiceToCloud(inv) {
+  try {
+    // Check if invoice already exists in cloud by invoice number or id
+    const { data: existing } = await supabaseClient.from('invoices').select('*');
+    const found = (existing || []).find(r => r.invoice_data?.id === inv.id || r.invoice_data?.number === inv.number);
+    
+    if (found) {
+      await supabaseClient.from('invoices').update({ invoice_data: inv }).eq('id', found.id);
+    } else {
+      await supabaseClient.from('invoices').insert([{ invoice_data: inv }]);
+    }
+    await fetchInvoicesFromCloud();
+  } catch (err) {
+    console.error('Sync to cloud error:', err);
+  }
+}
+
+async function deleteInvoiceFromCloud(invId) {
+  try {
+    const { data: existing } = await supabaseClient.from('invoices').select('*');
+    const found = (existing || []).find(r => r.invoice_data?.id === invId);
+    if (found) {
+      await supabaseClient.from('invoices').delete().eq('id', found.id);
+    }
+    await fetchInvoicesFromCloud();
+  } catch (err) {
+    console.error('Delete from cloud error:', err);
+  }
+}
+
 const getCompany  = ()  => ({ ...COMPANY_DEFAULT, ...load('hk_company',{}) });
 const getBank     = ()  => ({ ...BANK_DEFAULT,    ...load('hk_bank',{})    });
 const getBiz      = ()  => ({ ...BIZ_DEFAULT,     ...load('hk_biz',{})     });
